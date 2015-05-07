@@ -1,0 +1,22 @@
+{
+	"URI": "http://emdata2.int.janelia.org:7000/api/653/M10_LO/raw/0_1_2/18534_10786_32",
+	"SizeX": 18534,
+	"SizeY": 10786,
+	"Thickness": 32,
+	"BegZ": 10048,
+	"EndZ": 17567,
+	"Directories": [
+		{
+			"Path": "/groups/flyem/data/dvid-data/FIB-19/M10",
+			"BegZ": 10058,
+			"EndZ": 13182,
+			"Template": "bodies-z%05d-18534x10786x32.gz"
+		},
+		{
+			"Path": "/groups/flyem/data/dvid-data/FIB-19/LO",
+			"BegZ": 13183,
+			"EndZ": 17557,
+			"Template": "bodies-z%05d-18534x10786x32.gz"
+		}
+	]
+}
