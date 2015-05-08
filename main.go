@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 )
 
@@ -23,9 +22,9 @@ var (
 )
 
 const helpMessage = `
-raveler-import sends a series of label slabs to a DVID server. 
+dvid-import sends a series of label slabs to a DVID server. 
 
-Usage: raveler-import [options] <config file>
+Usage: dvid-import [options] <config file>
 
 	    -blocksize      =number   Number of Z slices should be combined to form each label slab (default 32)
 
@@ -39,6 +38,8 @@ The configuration file should be JSON that gives the slabs to be imported and th
 	"SizeX": 18534,
 	"SizeY": 10786,
 	"Thickness": 32,
+	"BegZ": 10048,
+	"EndZ": 17567,
 	"Directories": [
 		{
 			"Path": "/groups/flyem/data/dvid-data/FIB-19/M10",
@@ -148,42 +149,29 @@ func main() {
 	}
 
 	// Process each directory, label slab by label slab.
-	bytebuf := make([]byte, config.SizeX*config.SizeY*config.Thickness*8)
 	for slabBegZ := config.BegZ; slabBegZ <= config.EndZ; slabBegZ += *blocksize {
-		if err := processSlab(config, bytebuf, slabBegZ); err != nil {
+		if err := processSlab(config, slabBegZ); err != nil {
 			fmt.Printf("Error processing slab @ %d: %s\n", slabBegZ, err.Error())
 			os.Exit(1)
 		}
 	}
 }
 
-func processSlab(config Config, bytebuf []byte, slabBegZ int) error {
-	for i := range bytebuf {
-		bytebuf[i] = 0
-	}
+func processSlab(config Config, slabBegZ int) error {
+	fmt.Printf("Processing slab starting at %d ...\n", slabBegZ)
 
-	sliceBytes := config.SizeX * config.SizeY * 8
 	slabEndZ := slabBegZ + *blocksize - 1
-	url := fmt.Sprintf("%s/0_0_%d", config.URI, slabBegZ)
+	url := fmt.Sprintf("%s/0_0_%d?compression=gzip", config.URI, slabBegZ)
 
 	// Iterate through all directories and fill in byte buffer when intersecting.
-	zfilled := 0
 	for _, dir := range config.Directories {
-		begZ := slabBegZ
-		endZ := slabEndZ
-		if begZ > dir.EndZ || endZ < dir.BegZ {
+		if slabBegZ > dir.EndZ || slabEndZ < dir.BegZ {
 			continue
-		}
-		if begZ < dir.BegZ {
-			begZ = dir.BegZ
-		}
-		if endZ > dir.EndZ {
-			endZ = dir.EndZ
 		}
 
 		// Get the file
-		filename := fmt.Sprintf(dir.Template, slabBegZ)
-		fmt.Printf("Getting data for Z %d -> %d from %s ...\n", begZ, endZ, filename)
+		filename := filepath.Join(dir.Path, fmt.Sprintf(dir.Template, slabBegZ))
+		fmt.Printf("Getting data for Z %d -> %d from %s ...\n", slabBegZ, slabEndZ, filename)
 
 		var f *os.File
 		var err error
@@ -192,58 +180,18 @@ func processSlab(config Config, bytebuf []byte, slabBegZ int) error {
 		}
 		defer f.Close()
 
-		// If there is a slab for exactly this range, just send it.
-		if begZ == slabBegZ && endZ == slabEndZ {
-			fmt.Printf("Sending data via POST to %s ...\n", url)
-			if !*dryrun {
-				r, err := http.Post(url, "application/octet-stream", f)
-				if err != nil {
-					return err
-				}
-				if r.StatusCode != http.StatusOK {
-					return fmt.Errorf("Received bad status from POST on %q: %d\n", url, r.StatusCode)
-				}
+		// Send the data
+		fmt.Printf("Sending data via POST: %s\n", url)
+		if !*dryrun {
+			r, err := http.Post(url, "application/octet-stream", f)
+			if err != nil {
+				return err
 			}
-			return nil
-		}
-
-		// Else we have to read, uncompress, store into bytebuf.
-		gr, err := gzip.NewReader(f)
-		if err != nil {
-			return err
-		}
-		data, err := ioutil.ReadAll(gr)
-		if err != nil {
-			return err
-		}
-		if err = gr.Close(); err != nil {
-			return err
-		}
-		if len(data) != sliceBytes**blocksize {
-			return fmt.Errorf("Expected %d bytes from uncompressed gzip file, got %d instead.\n", sliceBytes**blocksize, len(data))
-		}
-
-		for volZ := begZ; volZ <= endZ; volZ++ {
-			zfilled++
-			fmt.Printf("Transferring slice %d over to buffer (%d filled)...\n", volZ, zfilled)
-			z := (volZ - slabBegZ) * sliceBytes
-			copy(bytebuf[z:z+sliceBytes], data[z:z+sliceBytes])
-		}
-
-		// If we've filled up the bytebuf, send it.
-		if zfilled == *blocksize {
-			fmt.Printf("Filled bytebuf, sending data.\n")
-			if !*dryrun {
-				r, err := http.Post(url, "application/octet-stream", bytes.NewBuffer(bytebuf))
-				if err != nil {
-					return err
-				}
-				if r.StatusCode != http.StatusOK {
-					return fmt.Errorf("Received bad status from POST on %q: %d\n", url, r.StatusCode)
-				}
+			if r.StatusCode != http.StatusOK {
+				return fmt.Errorf("Received bad status from POST on %q: %d\n", url, r.StatusCode)
 			}
-			return nil
 		}
+		return nil
 	}
 	return nil
 }
