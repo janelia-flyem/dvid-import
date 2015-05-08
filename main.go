@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,8 +11,6 @@ import (
 	"net/http"
 	"os"
 	"runtime"
-
-	lz4 "github.com/janelia-flyem/go/golz4"
 )
 
 var (
@@ -209,15 +208,21 @@ func processSlab(config Config, bytebuf []byte, slabBegZ int) error {
 		}
 
 		// Else we have to read, uncompress, store into bytebuf.
-		data := make([]byte, len(bytebuf))
-		compressed, err := ioutil.ReadAll(f)
+		gr, err := gzip.NewReader(f)
 		if err != nil {
 			return err
 		}
-		err = lz4.Uncompress(compressed, data)
+		data, err := ioutil.ReadAll(gr)
 		if err != nil {
 			return err
 		}
+		if err = gr.Close(); err != nil {
+			return err
+		}
+		if len(data) != sliceBytes**blocksize {
+			return fmt.Errorf("Expected %d bytes from uncompressed gzip file, got %d instead.\n", sliceBytes**blocksize, len(data))
+		}
+
 		for volZ := begZ; volZ <= endZ; volZ++ {
 			zfilled++
 			fmt.Printf("Transferring slice %d over to buffer (%d filled)...\n", volZ, zfilled)
