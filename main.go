@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -161,7 +163,14 @@ func processSlab(config Config, slabBegZ int) error {
 	fmt.Printf("Processing slab starting at %d ...\n", slabBegZ)
 
 	slabEndZ := slabBegZ + *blocksize - 1
-	url := fmt.Sprintf("%s/0_0_%d?compression=gzip", config.URI, slabBegZ)
+	xBytes := config.SizeX * 8
+	xyBytes := xBytes * config.SizeY
+	xyzBytes := xyBytes * *blocksize
+
+	sendSize := 1024 // will be 1024 x 1024 x blocksize POSTs
+	sxBytes := sendSize * 8
+	sxyBytes := sxBytes * sendSize
+	sxyzBytes := sxyBytes * *blocksize
 
 	// Iterate through all directories and fill in byte buffer when intersecting.
 	for _, dir := range config.Directories {
@@ -180,18 +189,63 @@ func processSlab(config Config, slabBegZ int) error {
 		}
 		defer f.Close()
 
-		// Send the data
-		fmt.Printf("Sending data via POST: %s\n", url)
-		if !*dryrun {
-			r, err := http.Post(url, "application/octet-stream", f)
-			if err != nil {
-				return err
+		// Read and uncompress the data.
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return err
+		}
+		data, err := ioutil.ReadAll(gr)
+		if err != nil {
+			return err
+		}
+		if err = gr.Close(); err != nil {
+			return err
+		}
+		if len(data) != xyzBytes {
+			return fmt.Errorf("Expected %d bytes from uncompressed gzip file, got %d instead.\n", xyzBytes, len(data))
+		}
+
+		// Iterate through X and Y until we've sent smaller block-aligned POSTs for entire slab.
+		for oy := 0; oy < config.SizeY; oy += sendSize {
+			endY := oy + sendSize
+			if endY > config.SizeY {
+				endY = config.SizeY
 			}
-			if r.StatusCode != http.StatusOK {
-				return fmt.Errorf("Received bad status from POST on %q: %d\n", url, r.StatusCode)
+			for ox := 0; ox < config.SizeX; ox += sendSize {
+				url := fmt.Sprintf("%s/%d_%d_%d", config.URI, ox, oy, slabBegZ)
+
+				span := sendSize
+				endX := ox + sendSize
+				if endX > config.SizeX {
+					endX = config.SizeX
+					span -= ox + sendSize - config.SizeX
+				}
+				span *= 8 // this is # of bytes per X we are xfering from slab
+
+				// Store data from slab into the POST buffer
+				bytebuf := make([]byte, sxyzBytes, sxyzBytes)
+				for sz := 0; sz < *blocksize; sz++ {
+					for sy := oy; sy < endY; sy++ {
+						si := sz*xyBytes + sy*xBytes
+						bi := sz*sxyBytes + sy*sxBytes
+						copy(bytebuf[bi:bi+span], data[si:si+span])
+					}
+				}
+
+				// Send the data
+				fmt.Printf("POSTing: %s\n", url)
+				if !*dryrun {
+					r, err := http.Post(url, "application/octet-stream", bytes.NewBuffer(bytebuf))
+					if err != nil {
+						return err
+					}
+					if r.StatusCode != http.StatusOK {
+						return fmt.Errorf("Received bad status from POST on %q: %d\n", url, r.StatusCode)
+					}
+				}
+				return nil
 			}
 		}
-		return nil
 	}
 	return nil
 }
